@@ -1,0 +1,70 @@
+name: Gitpod-Web Docker
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Auth Google Cloud SDK
+        uses: google-github-actions/auth@v0
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v0
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+      - name: Set up Docker
+        run: |
+          gcloud auth configure-docker --quiet
+      - uses: actions/setup-node@v3
+        with:
+          node-version: 18
+          cache: 'yarn'
+          cache-dependency-path: '**/yarn.lock'
+
+      - name: Execute yarn
+        run: |
+          yarn --frozen-lockfile
+
+      - name: Update Segment
+        working-directory: ./gitpod-web
+        run: |
+          set -e
+          setSegmentKey="setpath([\"segmentKey\"]; \"untrusted-dummy-key\")"
+          jqCommands="${setSegmentKey}"
+          cat package.json | jq "${jqCommands}" > package.json.tmp
+          mv package.json.tmp package.json
+
+      - name: Build
+        run: |
+          yarn build:gitpod-web
+          yarn --cwd gitpod-web/ inject-commit-hash
+
+      - name: Docker build and push
+        uses: docker/build-push-action@v3
+        with:
+          push: true
+          context: gitpod-web
+          tags: eu.gcr.io/gitpod-core-dev/build/ide/gitpod-code-web:commit-${{ github.sha }}
+
+      - name: Output the image tag to the GitHub Summary
+        run: |
+          echo "Successfully built the \`gitpod-web\` extension with the tag:" >> summary.md
+          echo "" >> summary.md
+          echo "\`\`\`" >> summary.md
+          echo "commit-${{ github.sha }}" >> summary.md
+          echo "\`\`\`" >> summary.md
+          cat summary.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Get previous job's status
+        id: lastrun
+        uses: filiptronicek/get-last-job-status@main
+
+      - name: Slack Notification
+        if: ${{ (success() && steps.lastrun.outputs.status == 'failed') || failure() }}
+        uses: rtCamp/action-slack-notify@v2
+        env:
+          SLACK_WEBHOOK: ${{ secrets.IDE_SLACK_WEBHOOK }}
+          SLACK_COLOR: ${{ job.status }}
